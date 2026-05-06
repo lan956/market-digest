@@ -1,0 +1,35 @@
+# Indian Market Digest
+# NSE closes at 3:30 PM IST (UTC+5:30) = 10:00 UTC
+# Runs at 10:30 UTC — 30 min after close
+# Runs Mon–Fri only
+
+name: Indian Market Digest
+
+on:
+  schedule:
+    - cron: "30 10 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Indian digest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python src/main.py --market in
