@@ -1,0 +1,35 @@
+# Korean Market Digest
+# KOSPI + KOSDAQ close at 3:30 PM KST (UTC+9) = 06:30 UTC
+# Runs at 07:00 UTC — 30 min after close
+# Runs Mon–Fri only (Korean market holidays handled by data check in script)
+
+name: Korean Market Digest
+
+on:
+  schedule:
+    - cron: "0 7 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Korean digest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python src/main.py --market kr

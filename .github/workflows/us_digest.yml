@@ -1,0 +1,36 @@
+# US Market Digest
+# NYSE + NASDAQ close at 4:00 PM ET
+# EDT (summer): 4 PM ET = 20:00 UTC  |  EST (winter): 4 PM ET = 21:00 UTC
+# Runs at 21:30 UTC — safe buffer for both DST states
+# Runs Mon–Fri only
+
+name: US Market Digest
+
+on:
+  schedule:
+    - cron: "30 21 * * 1-5"
+  workflow_dispatch:          # allow manual trigger for testing
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180      # options OI fetch for 300 stocks can take ~60–90 min
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run US digest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python src/main.py --market us
