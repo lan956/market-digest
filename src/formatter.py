@@ -9,19 +9,11 @@ import pandas as pd
 from datetime import date as Date
 
 MARKET_META = {
-    "us": {"flag": "🇺🇸", "label": "US Market",     "exchange": "NYSE + NASDAQ"},
-    "kr": {"flag": "🇰🇷", "label": "Korean Market",  "exchange": "KOSPI + KOSDAQ"},
-    "jp": {"flag": "🇯🇵", "label": "Japanese Market","exchange": "TSE (Nikkei 225)"},
-    "in": {"flag": "🇮🇳", "label": "Indian Market",  "exchange": "NSE (NIFTY 500)"},
+    "us": {"flag": "🇺🇸", "label": "US Market",      "exchange": "NYSE + NASDAQ",    "currency": "$",  "currency_after": False},
+    "kr": {"flag": "🇰🇷", "label": "Korean Market",   "exchange": "KOSPI + KOSDAQ",   "currency": "₩",  "currency_after": False},
+    "jp": {"flag": "🇯🇵", "label": "Japanese Market", "exchange": "TSE (Nikkei 225)", "currency": "¥",  "currency_after": False},
+    "in": {"flag": "🇮🇳", "label": "Indian Market",   "exchange": "NSE (NIFTY 500)",  "currency": "₹",  "currency_after": False},
 }
-
-
-def _fmt_num(val, prefix="", suffix="", decimals=2) -> str:
-    """Format a number nicely; return '—' if None/NaN."""
-    try:
-        return f"{prefix}{val:,.{decimals}f}{suffix}"
-    except Exception:
-        return "—"
 
 
 def _fmt_volume(vol) -> str:
@@ -38,16 +30,28 @@ def _fmt_volume(vol) -> str:
         return "—"
 
 
-def _fmt_cap(cap) -> str:
+def _fmt_price(val, currency: str = "$", decimals: int = 2) -> str:
+    """Format a price with the correct currency symbol. Auto-reduces decimals for large values."""
+    try:
+        v = float(val)
+        # For KRW/JPY whole-number currencies, show 0 decimal places
+        if currency in ("₩", "¥") or v >= 1000:
+            return f"{currency}{v:,.0f}"
+        return f"{currency}{v:,.{decimals}f}"
+    except Exception:
+        return "—"
+
+
+def _fmt_cap(cap, currency: str = "$") -> str:
     try:
         v = float(cap)
         if v >= 1e12:
-            return f"${v/1e12:.2f}T"
+            return f"{currency}{v/1e12:.2f}T"
         if v >= 1e9:
-            return f"${v/1e9:.2f}B"
+            return f"{currency}{v/1e9:.2f}B"
         if v >= 1e6:
-            return f"${v/1e6:.2f}M"
-        return f"${v:,.0f}"
+            return f"{currency}{v/1e6:.2f}M"
+        return f"{currency}{v:,.0f}"
     except Exception:
         return "—"
 
@@ -75,72 +79,98 @@ def build_header(market: str, session_date: Date, ticker_count: int) -> str:
     )
 
 
-def build_volume_section(df: pd.DataFrame) -> str:
+NAME_MAX = 16   # max chars for company name display
+
+
+def _name(ticker: str, names: dict) -> str:
+    """Return truncated company name, or empty string if not available."""
+    n = names.get(ticker, "")
+    if not n or n == ticker:
+        return ""
+    return n[:NAME_MAX].strip()
+
+
+def build_volume_section(df: pd.DataFrame, names: dict, currency: str = "$") -> str:
     if df.empty:
         return ""
     lines = [_divider("📦  TOP 20 BY VOLUME")]
     for i, row in df.iterrows():
         pct = _pct_str(row.get("pct_change"))
         vol = _fmt_volume(row.get("volume"))
-        close = _fmt_num(row.get("close"), prefix="$")
+        close = _fmt_price(row.get("close"), currency)
+        name = _name(row["ticker"], names)
+        name_str = f"  <i>{name}</i>" if name else ""
         lines.append(
-            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>  {close}  {pct}  Vol: {vol}"
+            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>{name_str}\n"
+            f"     {close}  {pct}  Vol: {vol}"
         )
     return "\n".join(lines)
 
 
-def build_gainers_section(df: pd.DataFrame) -> str:
+def build_gainers_section(df: pd.DataFrame, names: dict, currency: str = "$") -> str:
     if df.empty:
         return ""
     lines = [_divider("📈  TOP 20 GAINERS")]
     for i, row in df.iterrows():
         pct = _pct_str(row.get("pct_change"))
         vol = _fmt_volume(row.get("volume"))
-        close = _fmt_num(row.get("close"), prefix="$")
+        close = _fmt_price(row.get("close"), currency)
+        name = _name(row["ticker"], names)
+        name_str = f"  <i>{name}</i>" if name else ""
         lines.append(
-            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>  {close}  <b>{pct}</b>  Vol: {vol}"
+            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>{name_str}\n"
+            f"     {close}  <b>{pct}</b>  Vol: {vol}"
         )
     return "\n".join(lines)
 
 
-def build_losers_section(df: pd.DataFrame) -> str:
+def build_losers_section(df: pd.DataFrame, names: dict, currency: str = "$") -> str:
     if df.empty:
         return ""
     lines = [_divider("📉  TOP 20 LOSERS")]
     for i, row in df.iterrows():
         pct = _pct_str(row.get("pct_change"))
         vol = _fmt_volume(row.get("volume"))
-        close = _fmt_num(row.get("close"), prefix="$")
+        close = _fmt_price(row.get("close"), currency)
+        name = _name(row["ticker"], names)
+        name_str = f"  <i>{name}</i>" if name else ""
         lines.append(
-            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>  {close}  <b>{pct}</b>  Vol: {vol}"
+            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>{name_str}\n"
+            f"     {close}  <b>{pct}</b>  Vol: {vol}"
         )
     return "\n".join(lines)
 
 
-def build_mktcap_section(df: pd.DataFrame) -> str:
+def build_mktcap_section(df: pd.DataFrame, names: dict, currency: str = "$") -> str:
     if df.empty:
         return ""
     lines = [_divider("💰  TOP 20 BY MARKET CAP")]
     for i, row in df.iterrows():
-        cap = _fmt_cap(row.get("market_cap"))
+        cap = _fmt_cap(row.get("market_cap"), currency)
         pct = _pct_str(row.get("pct_change"))
-        close = _fmt_num(row.get("close"), prefix="$")
+        close = _fmt_price(row.get("close"), currency)
+        name = _name(row["ticker"], names)
+        name_str = f"  <i>{name}</i>" if name else ""
         lines.append(
-            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>  {close}  {pct}  Cap: {cap}"
+            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>{name_str}\n"
+            f"     {close}  {pct}  Cap: {cap}"
         )
     return "\n".join(lines)
 
 
-def build_oi_section(df: pd.DataFrame) -> str:
+def build_oi_section(df: pd.DataFrame, names: dict, currency: str = "$") -> str:
     if df.empty:
         return ""
     lines = [_divider("⚡  TOP 20 OPTIONS OPEN INTEREST  (US only)")]
     for i, row in df.iterrows():
         oi = _fmt_volume(row.get("options_oi"))
         pct = _pct_str(row.get("pct_change"))
-        close = _fmt_num(row.get("close"), prefix="$")
+        close = _fmt_price(row.get("close"), currency)
+        name = _name(row["ticker"], names)
+        name_str = f"  <i>{name}</i>" if name else ""
         lines.append(
-            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>  {close}  {pct}  OI: {oi}"
+            f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>{name_str}\n"
+            f"     {close}  {pct}  OI: {oi}"
         )
     return "\n".join(lines)
 
@@ -154,17 +184,22 @@ def build_all_sections(
     df_losers: pd.DataFrame,
     df_mktcap: pd.DataFrame,
     df_oi: pd.DataFrame,
+    names: dict | None = None,
 ) -> list[str]:
     """
     Returns a list of Telegram message strings, one per section.
     """
+    if names is None:
+        names = {}
+    currency = MARKET_META.get(market, {}).get("currency", "$")
     header = build_header(market, session_date, ticker_count)
     sections = [
         header,
-        build_volume_section(df_volume),
-        build_gainers_section(df_gainers),
-        build_losers_section(df_losers),
-        build_mktcap_section(df_mktcap),
-        build_oi_section(df_oi),
+        build_volume_section(df_volume, names, currency),
+        build_gainers_section(df_gainers, names, currency),
+        build_losers_section(df_losers, names, currency),
+        build_mktcap_section(df_mktcap, names, currency),
+        build_oi_section(df_oi, names, currency),
     ]
     return [s for s in sections if s.strip()]
+
