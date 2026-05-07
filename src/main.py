@@ -55,7 +55,7 @@ def run(market: str, token: str, chat_id: str) -> None:
     logger.info(f"═══════════════════════════════════════")
 
     # ── 1. Ticker discovery ──────────────────────────────────────────────────
-    logger.info("Step 1/5  Fetching ticker list…")
+    logger.info("Step 1/6  Fetching ticker list…")
     tickers = fetcher.get_tickers(market)
     logger.info(f"  Total tickers: {len(tickers)}")
     if not tickers:
@@ -63,7 +63,7 @@ def run(market: str, token: str, chat_id: str) -> None:
         sys.exit(1)
 
     # ── 2. OHLCV batch download ──────────────────────────────────────────────
-    logger.info("Step 2/5  Downloading OHLCV data…")
+    logger.info("Step 2/6  Downloading OHLCV data…")
     df = fetcher.batch_download(tickers, period="5d")
     if df.empty:
         logger.error("No OHLCV data returned — aborting.")
@@ -75,25 +75,35 @@ def run(market: str, token: str, chat_id: str) -> None:
     logger.info(f"  Session date resolved to: {latest_date}  ({len(df)} tickers with data)")
 
     # ── 3. Market cap enrichment ─────────────────────────────────────────────
-    logger.info("Step 3/5  Fetching market caps…")
+    logger.info("Step 3/6  Fetching market caps…")
     df = fetcher.enrich_market_cap(df, limit=100)
 
     # ── 4. Options OI (US only) ──────────────────────────────────────────────
     oi_dict: dict = {}
     if market == "us":
-        logger.info("Step 4/5  Fetching options open interest…")
+        logger.info("Step 4/6  Fetching options open interest…")
         oi_dict = fetcher.fetch_options_oi(df, limit=300)
     else:
-        logger.info("Step 4/5  Skipping options OI (US only)")
+        logger.info("Step 4/6  Skipping options OI (US only)")
 
     # ── 5. Rank + format + send ──────────────────────────────────────────────
-    logger.info("Step 5/5  Ranking, formatting, and sending…")
+    logger.info("Step 5/6  Ranking…")
 
     df_volume  = screener.top_by_volume(df)
     df_gainers = screener.top_gainers(df)
     df_losers  = screener.top_losers(df)
     df_mktcap  = screener.top_by_market_cap(df)
     df_oi      = screener.top_by_options_oi(df, oi_dict)
+
+    # Collect the union of all ranked tickers for name lookup (≤ ~100 tickers)
+    ranked_tickers = list({
+        t for df_r in [df_volume, df_gainers, df_losers, df_mktcap, df_oi]
+        if not df_r.empty
+        for t in df_r["ticker"].tolist()
+    })
+
+    logger.info("Step 6/6  Fetching names, formatting, and sending…")
+    names = fetcher.fetch_names(ranked_tickers)
 
     sections = formatter.build_all_sections(
         market=market,
@@ -104,6 +114,7 @@ def run(market: str, token: str, chat_id: str) -> None:
         df_losers=df_losers,
         df_mktcap=df_mktcap,
         df_oi=df_oi,
+        names=names,
     )
 
     telegram_bot.send_digest(token, chat_id, sections)
@@ -135,3 +146,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
