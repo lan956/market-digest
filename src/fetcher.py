@@ -25,9 +25,12 @@ import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
-CHUNK_SIZE = 200          # tickers per yfinance batch call
-OI_CANDIDATE_LIMIT = 300  # fetch options OI for the top-N-by-volume stocks only
-MKTCAP_LIMIT = 100        # fetch market cap for top-N-by-volume stocks
+CHUNK_SIZE = 100          # smaller chunks reduce rate-limit risk
+OI_CANDIDATE_LIMIT = 200  # reduced: 300 was hitting YF too hard after bulk download
+MKTCAP_LIMIT = 100
+CHUNK_SLEEP   = 5.0       # seconds between chunks (was 0.5 — too aggressive)
+RATE_LIMIT_SLEEP = 90     # seconds to wait after a rate-limit error before retrying
+MAX_RETRIES   = 2         # retry attempts per chunk on rate limit
 
 
 # ─────────────────────────────────────────────
@@ -36,96 +39,91 @@ MKTCAP_LIMIT = 100        # fetch market cap for top-N-by-volume stocks
 
 def get_us_tickers() -> list[str]:
     """
-    Fetch all NYSE + NASDAQ listed tickers.
+    Fetch NYSE + NASDAQ listed tickers only (no OTC / pink sheets).
 
     Sources tried in order:
-      1. NASDAQ Trader FTP (HTTP — this server does NOT support HTTPS)
-      2. SEC EDGAR company tickers (HTTPS fallback, ~10k companies)
-      3. Hardcoded S&P 500 + NASDAQ 100 (last resort)
+      1. SEC EDGAR company_tickers_exchange.json  — HTTPS, includes exchange field,
+         so we can filter to NYSE + Nasdaq only (~6,000–8,000 tickers)
+      2. SEC EDGAR company_tickers.json           — HTTPS fallback, no exchange field,
+         filter by symbol shape only (~10k, includes some OTC)
+      3. Hardcoded S&P 500 + NASDAQ 100           — last resort
     """
     tickers: set[str] = set()
+    HEADERS = {"User-Agent": "MarketDigest/1.0 contact@example.com"}
 
-    # ── Source 1: NASDAQ Trader FTP (must be HTTP, not HTTPS) ────────────────
-    NASDAQ_SOURCES = {
-        "nasdaq": "http://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
-        "other":  "http://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
-    }
-    HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; MarketDigest/1.0)"}
-
-    for name, url in NASDAQ_SOURCES.items():
+    # ── Source 1: Exchange-filtered EDGAR (preferred) ─────────────────────────
+    try:
+        r = requests.get(
+            "https://www.sec.gov/files/company_tickers_exchange.json",
+            headers=HEADERS,
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        # Schema: {"fields": ["cik","name","ticker","exchange"], "data": [[...], ...]}
+        fields = data.get("fields", [])
+        rows   = data.get("data", [])
         try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
-            r.raise_for_status()
-            df = pd.read_csv(StringIO(r.text), sep="|")
-            df = df.iloc[:-1]  # last row is file-creation metadata
-            sym_col = "Symbol" if "Symbol" in df.columns else "ACT Symbol"
-            if "Test Issue" in df.columns:
-                df = df[df["Test Issue"] == "N"]
-            syms = df[sym_col].dropna().astype(str).str.strip()
-            syms = syms[syms.str.match(r"^[A-Z]{1,5}$")]
-            tickers.update(syms.tolist())
-            logger.info(f"  US {name}: {len(syms)} tickers loaded from NASDAQ FTP")
-        except Exception as e:
-            logger.error(f"  NASDAQ FTP failed for {name}: {e}")
+            ticker_idx   = fields.index("ticker")
+            exchange_idx = fields.index("exchange")
+        except ValueError:
+            raise ValueError("Unexpected EDGAR exchange JSON schema")
+
+        ALLOWED_EXCHANGES = {"NYSE", "Nasdaq", "NASDAQ"}
+        for row in rows:
+            sym = str(row[ticker_idx]).strip().upper()
+            exch = str(row[exchange_idx]).strip()
+            if exch in ALLOWED_EXCHANGES and sym.isalpha() and 1 <= len(sym) <= 5:
+                tickers.add(sym)
+
+        logger.info(f"  US: {len(tickers)} tickers loaded from SEC EDGAR (exchange-filtered)")
+    except Exception as e:
+        logger.error(f"  SEC EDGAR exchange file failed: {e}")
 
     if tickers:
         return sorted(tickers)
 
-    # ── Source 2: SEC EDGAR (HTTPS, always available) ────────────────────────
-    logger.warning("NASDAQ FTP unavailable — trying SEC EDGAR...")
+    # ── Source 2: Unfiltered EDGAR fallback ───────────────────────────────────
+    logger.warning("Exchange-filtered EDGAR failed — trying unfiltered EDGAR...")
     try:
         r = requests.get(
             "https://www.sec.gov/files/company_tickers.json",
-            headers={"User-Agent": "MarketDigest/1.0 contact@example.com"},
+            headers=HEADERS,
             timeout=30,
         )
         r.raise_for_status()
         data = r.json()
         syms = [v["ticker"] for v in data.values() if isinstance(v.get("ticker"), str)]
-        syms = [s.strip() for s in syms if s.strip() and s.strip().isalpha() and len(s) <= 5]
-        tickers.update(s.upper() for s in syms)
-        logger.info(f"  US: {len(tickers)} tickers loaded from SEC EDGAR")
+        syms = [s.strip().upper() for s in syms if s.strip().isalpha() and 1 <= len(s) <= 5]
+        tickers.update(syms)
+        logger.info(f"  US: {len(tickers)} tickers loaded from SEC EDGAR (unfiltered)")
     except Exception as e:
-        logger.error(f"  SEC EDGAR failed: {e}")
+        logger.error(f"  SEC EDGAR unfiltered failed: {e}")
 
     if tickers:
         return sorted(tickers)
 
-    # ── Source 3: Hardcoded S&P 500 + NASDAQ 100 ────────────────────────────
+    # ── Source 3: Hardcoded S&P 500 + NASDAQ 100 ─────────────────────────────
     logger.warning("All live sources failed — using hardcoded S&P 500 + NASDAQ 100 fallback")
     SP500_NDX100 = [
-        # Mega cap / NASDAQ 100 core
         "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","TSLA","AVGO","COST",
         "NFLX","AMD","ADBE","QCOM","INTC","AMAT","MU","LRCX","KLAC","MRVL",
         "PANW","CRWD","SNPS","CDNS","FTNT","ORLY","PAYX","CTAS","FAST","BIIB",
         "GILD","VRTX","REGN","IDXX","ILMN","DXCM","ALGN","MRNA","ISRG","SGEN",
         "TEAM","ZS","OKTA","DDOG","NET","SNOW","ABNB","UBER","LYFT","DASH",
-        # S&P 500 large caps
-        "BRK-B","LLY","JPM","V","UNH","XOM","JNJ","PG","MA","HD",
+        "BRK","LLY","JPM","V","UNH","XOM","JNJ","PG","MA","HD",
         "CVX","MRK","ABBV","BAC","PFE","KO","PEP","TMO","CSCO","ACN",
         "ABT","WMT","MCD","CRM","TXN","DHR","NEE","PM","RTX","HON",
         "UPS","SPGI","LOW","GS","IBM","BLK","CAT","SYK","AXP","INTU",
-        "ELV","CVS","MDT","ADP","BKNG","GILD","TJX","CI","NOW","ANET",
-        "DE","MMC","ZTS","PLD","AMT","BDX","AON","ITW","MCO","EQIX",
-        "DUK","SO","AEP","EXC","D","SRE","WEC","ES","ETR","XEL",
-        "GE","MMM","EMR","ROK","PH","CMI","IR","ETN","DOV","AME",
-        "FCX","NEM","GOLD","AA","CLF","X","NUE","STLD","RS","ATI",
-        "WFC","C","MS","USB","PNC","TFC","COF","AIG","MET","PRU",
-        "SPG","PSA","WELL","DLR","O","AVB","EQR","MAA","UDR","CPT",
-        "LIN","APD","ECL","SHW","PPG","IFF","EMN","CE","DD","DOW",
-        "UNP","CSX","NSC","KSU","CP","CNI","FDX","GD","LMT","NOC",
-        "BA","HII","TDG","HEI","LDOS","SAIC","BAX","BIO","A","WAT",
-        "DIS","CMCSA","CHTR","PARA","FOX","FOXA","WBD","NWSA","NYT","OMC",
-        "T","VZ","TMUS","LUMN","FYBR","WBD","SIRI","DISH","ATUS","LBRDK",
-        "TGT","DLTR","DG","KR","ACI","SFM","FIVE","ULTA","BBY","GPS",
-        "NKE","VFC","PVH","RL","TPR","HBI","UA","UAA","LEVI","SKX",
-        "CAR","HTZ","ABNB","H","HLT","MAR","WH","IHG","RCL","CCL",
-        "MO","BTI","PM","SWMAY","VGR","STZ","TAP","BUD","SAM","BOOT",
-        "SQ","PYPL","MA","V","FIS","FI","GPN","ADP","PAYX","WEX",
-        "GOLD","GLD","SLV","IAU","GDX","GDXJ","RING","SIL","SILJ","PSLV",
+        "ELV","CVS","MDT","ADP","BKNG","TJX","CI","NOW","ANET","DE",
+        "MMC","ZTS","PLD","AMT","BDX","AON","ITW","MCO","EQIX","DUK",
+        "SO","AEP","EXC","SRE","WEC","GE","MMM","EMR","ROK","PH",
+        "CMI","ETN","FCX","NEM","WFC","C","MS","USB","PNC","TFC",
+        "COF","SPG","PSA","WELL","DLR","LIN","APD","ECL","SHW","PPG",
+        "UNP","CSX","NSC","FDX","GD","LMT","NOC","BA","TDG","DIS",
+        "CMCSA","T","VZ","TMUS","TGT","DLTR","DG","KR","NKE","VFC",
     ]
     return sorted(set(SP500_NDX100))
-
 
 def get_jp_tickers() -> list[str]:
     """
@@ -317,7 +315,6 @@ def get_tickers(market: str) -> list[str]:
         raise ValueError(f"Unknown market: {market}")
     return fn()
 
-
 # ─────────────────────────────────────────────
 # OHLCV BATCH DOWNLOAD
 # ─────────────────────────────────────────────
@@ -325,8 +322,10 @@ def get_tickers(market: str) -> list[str]:
 def batch_download(tickers: list[str], period: str = "5d") -> pd.DataFrame:
     """
     Download OHLCV for all tickers in chunks.
-    Returns a flat DataFrame:
-      ticker | open | high | low | close | volume | pct_change | date
+    - Chunk size: 100 (reduced to ease rate limiting)
+    - Sleep between chunks: 5s
+    - On rate limit: waits 90s and retries up to 2 times per chunk
+    Returns a flat DataFrame: ticker | open | high | low | close | volume | pct_change | date
     """
     rows: list[dict] = []
     total_chunks = (len(tickers) + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -335,51 +334,65 @@ def batch_download(tickers: list[str], period: str = "5d") -> pd.DataFrame:
         chunk = tickers[chunk_idx : chunk_idx + CHUNK_SIZE]
         chunk_num = chunk_idx // CHUNK_SIZE + 1
         logger.info(f"  Downloading chunk {chunk_num}/{total_chunks} ({len(chunk)} tickers)…")
-        try:
-            raw = yf.download(
-                chunk,
-                period=period,
-                interval="1d",
-                group_by="ticker",
-                auto_adjust=True,
-                threads=True,
-                progress=False,
-            )
 
-            for ticker in chunk:
-                try:
-                    # yfinance returns MultiIndex if multiple tickers, flat if single
-                    df_t = raw[ticker] if len(chunk) > 1 else raw
-                    df_t = df_t.dropna(subset=["Close"])
-                    if len(df_t) < 2:
-                        continue
+        raw = None
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                raw = yf.download(
+                    chunk,
+                    period=period,
+                    interval="1d",
+                    group_by="ticker",
+                    auto_adjust=True,
+                    threads=True,
+                    progress=False,
+                )
+                break  # success — exit retry loop
+            except Exception as e:
+                err_str = str(e)
+                is_rate_limit = "Rate" in err_str or "429" in err_str or "Too Many" in err_str
+                if is_rate_limit and attempt < MAX_RETRIES:
+                    logger.warning(
+                        f"  Rate limited on chunk {chunk_num} "
+                        f"(attempt {attempt+1}/{MAX_RETRIES+1}). "
+                        f"Sleeping {RATE_LIMIT_SLEEP}s…"
+                    )
+                    time.sleep(RATE_LIMIT_SLEEP)
+                else:
+                    logger.error(f"  Chunk {chunk_num} download failed: {e}")
+                    break
 
-                    last = df_t.iloc[-1]
-                    prev = df_t.iloc[-2]
-                    pct = ((last["Close"] - prev["Close"]) / prev["Close"]) * 100
+        if raw is None or (hasattr(raw, "empty") and raw.empty):
+            time.sleep(CHUNK_SLEEP)
+            continue
 
-                    rows.append({
-                        "ticker":     ticker,
-                        "open":       round(float(last["Open"]), 4),
-                        "high":       round(float(last["High"]), 4),
-                        "low":        round(float(last["Low"]), 4),
-                        "close":      round(float(last["Close"]), 4),
-                        "volume":     float(last["Volume"]),
-                        "pct_change": round(float(pct), 2),
-                        "date":       df_t.index[-1].date(),
-                    })
-                except Exception:
-                    continue  # skip individual ticker errors silently
+        for ticker in chunk:
+            try:
+                df_t = raw[ticker] if len(chunk) > 1 else raw
+                df_t = df_t.dropna(subset=["Close"])
+                if len(df_t) < 2:
+                    continue
+                last = df_t.iloc[-1]
+                prev = df_t.iloc[-2]
+                pct  = ((last["Close"] - prev["Close"]) / prev["Close"]) * 100
+                rows.append({
+                    "ticker":     ticker,
+                    "open":       round(float(last["Open"]),  4),
+                    "high":       round(float(last["High"]),  4),
+                    "low":        round(float(last["Low"]),   4),
+                    "close":      round(float(last["Close"]), 4),
+                    "volume":     float(last["Volume"]),
+                    "pct_change": round(float(pct), 2),
+                    "date":       df_t.index[-1].date(),
+                })
+            except Exception:
+                continue
 
-        except Exception as e:
-            logger.error(f"Chunk {chunk_num} download error: {e}")
-
-        time.sleep(0.5)  # polite rate limiting
+        time.sleep(CHUNK_SLEEP)
 
     logger.info(f"  Downloaded {len(rows)} tickers successfully")
     return pd.DataFrame(rows)
-
-
+  
 # ─────────────────────────────────────────────
 # MARKET CAP ENRICHMENT
 # ─────────────────────────────────────────────
@@ -415,26 +428,29 @@ def enrich_market_cap(df: pd.DataFrame, limit: int = MKTCAP_LIMIT) -> pd.DataFra
 
 def fetch_options_oi(df: pd.DataFrame, limit: int = OI_CANDIDATE_LIMIT) -> dict[str, int]:
     """
-    For the top-`limit` stocks by volume, fetch options open interest
-    (calls + puts, nearest 3 expiries) and return a dict {ticker: total_oi}.
-    US market only — Yahoo Finance options data is sparse for Asian markets.
+    Fetch total options open interest (calls + puts, nearest 3 expiries).
+    Waits 60s before starting to let Yahoo Finance rate-limit cooldown after bulk download.
+    US market only.
     """
     candidates = (
         df.sort_values("volume", ascending=False)
         .head(limit)["ticker"]
         .tolist()
     )
+    logger.info(f"  Cooling down 60s before options OI fetch (avoid rate limit)…")
+    time.sleep(60)
+
     logger.info(f"  Fetching options OI for {len(candidates)} candidates…")
     oi_data: dict[str, int] = {}
 
-    for ticker in candidates:
+    for idx, ticker in enumerate(candidates):
         try:
             t = yf.Ticker(ticker)
-            expirations = t.options  # list of expiry date strings
+            expirations = t.options
             if not expirations:
                 continue
             total_oi = 0
-            for exp in expirations[:3]:  # nearest 3 expiries only
+            for exp in expirations[:3]:
                 try:
                     chain = t.option_chain(exp)
                     total_oi += int(chain.calls["openInterest"].fillna(0).sum())
@@ -443,8 +459,15 @@ def fetch_options_oi(df: pd.DataFrame, limit: int = OI_CANDIDATE_LIMIT) -> dict[
                     continue
             if total_oi > 0:
                 oi_data[ticker] = total_oi
-            time.sleep(0.25)
-        except Exception:
+            time.sleep(0.5)
+            # Extra pause every 50 tickers
+            if (idx + 1) % 50 == 0:
+                logger.info(f"  OI progress: {idx+1}/{len(candidates)}, sleeping 15s…")
+                time.sleep(15)
+        except Exception as e:
+            if "Rate" in str(e) or "429" in str(e):
+                logger.warning(f"  OI rate limited at {ticker}, sleeping 60s…")
+                time.sleep(60)
             continue
 
     logger.info(f"  Options OI fetched for {len(oi_data)} tickers")
@@ -484,3 +507,4 @@ def fetch_names(tickers: list[str]) -> dict[str, str]:
             names[ticker] = ticker
     logger.info(f"  Names fetched: {len(names)}")
     return names
+
