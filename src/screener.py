@@ -9,10 +9,11 @@ import pandas as pd
 
 
 def top_by_volume(df: pd.DataFrame, n: int = 20) -> pd.DataFrame:
-    """Top N tickers by trading volume (descending)."""
+    """Top N tickers by monetary volume (close price × shares traded), descending."""
+    df = df.dropna(subset=["volume", "close"]).copy()
+    df["dollar_volume"] = df["close"] * df["volume"]
     return (
-        df.dropna(subset=["volume"])
-        .sort_values("volume", ascending=False)
+        df.sort_values("dollar_volume", ascending=False)
         .head(n)
         .reset_index(drop=True)
     )
@@ -65,4 +66,5 @@ def top_by_options_oi(df: pd.DataFrame, oi_dict: dict, n: int = 20) -> pd.DataFr
         .head(n)
         .reset_index(drop=True)
     )
+
 
