@@ -93,16 +93,16 @@ def _name(ticker: str, names: dict) -> str:
 def build_volume_section(df: pd.DataFrame, names: dict, currency: str = "$") -> str:
     if df.empty:
         return ""
-    lines = [_divider("📦  TOP 20 BY VOLUME")]
+    lines = [_divider("📦  TOP 20 BY MONETARY VOLUME")]
     for i, row in df.iterrows():
-        pct = _pct_str(row.get("pct_change"))
-        vol = _fmt_volume(row.get("volume"))
+        pct   = _pct_str(row.get("pct_change"))
+        dvol  = _fmt_cap(row.get("dollar_volume"), currency)   # reuse cap formatter (T/B/M)
         close = _fmt_price(row.get("close"), currency)
-        name = _name(row["ticker"], names)
+        name  = _name(row["ticker"], names)
         name_str = f"  <i>{name}</i>" if name else ""
         lines.append(
             f"<code>{i+1:>2}.</code> <b>{row['ticker']}</b>{name_str}\n"
-            f"     {close}  {pct}  Vol: {vol}"
+            f"     {close}  {pct}  Vol: {dvol}"
         )
     return "\n".join(lines)
 
@@ -202,4 +202,5 @@ def build_all_sections(
         build_oi_section(df_oi, names, currency),
     ]
     return [s for s in sections if s.strip()]
+
 
